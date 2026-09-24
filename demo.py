@@ -1,108 +1,142 @@
 #!/usr/bin/env python3
-"""固定输入演示：Beaver 三元组乘法转录模拟。
+"""固定输入演示：带会话绑定的 Beaver 三元组乘法离线转录。
 
-运行：``python demo.py``（约 1 秒内完成，纯标准库、离线、确定性）。
+运行：``python demo.py``（远小于 90 秒预算，纯标准库、离线、确定性）。
 
-演示两部分：
-1. 正常路径：显式合成输入 x=12, y=8，消息乱序 + 一条重复消息投递，
-   打开后打印各方视图并用独立朴素模乘 (x*y) % 101 核对重构结果。
-2. 拒绝边界：尝试在第二个操作中复用已消费的 triple_id，转录机抛出
-   :class:`TripleReusedError`，演示一次性消费语义。
+三部分，全部为实时计算：
+1. 两个合成会话 ``sA`` / ``sB``（含同名操作 ``mul``）严格交错、乱序投递，
+   分别打开，用独立朴素模乘核对重构乘积与各方份额。
+2. 把两个会话的全部消息整批重放：相同重复一律幂等（``duplicate``），
+   重复打开返回同一缓存结果。
+3. 实际错误边界：向 ``sA/mul`` 重放一条内容冲突的消息 → 冲突中止该操作、
+   三元组作废；之后任何重放（哪怕与原消息一致）都被
+   ``OperationAbortedError`` 拒绝；同一 transcript 里的 ``sB/mul`` 不受
+   影响，照常打开。
 """
 
 import random
 
 from sss_mult import (
     P,
+    ConflictError,
+    OperationAbortedError,
     Transcript,
     TripleBank,
-    TripleReusedError,
     honest_prepare,
     make_triple,
 )
 
-SEED = 20260923
+SEED = 20260924
+SA, SB = "sA", "sB"
 
 
-def print_views(result) -> None:
-    print(f"  公开值: d = {result.d}, e = {result.e}")
-    print(f"  重构输入: x = a + d = {result.x}, y = b + e = {result.y}")
-    print("  各方视图 (a_i, b_i, c_i) 与输出份额 z_i:")
-    for v in result.views:
-        extra = "  (含常量 d*e)" if v.party == 0 else ""
-        print(
-            f"    P{v.party}: a_i={v.a_i:3d}  b_i={v.b_i:3d}  c_i={v.c_i:3d}"
-            f"  d_i={v.d_i:3d}  e_i={v.e_i:3d}  ->  z_i={v.z_i:3d}{extra}"
-        )
+def check_product(result, x, y, tag):
+    plain = (x * y) % P  # 独立朴素参考，不经过被测核心
+    print(f"  [{tag}] 重构 {result.session_id}/mul = {result.product}，"
+          f"朴素参考 ({x}*{y}) mod {P} = {plain}")
+    assert result.product == plain
 
 
 def main() -> int:
-    print("=" * 68)
-    print("sss_mult 演示：p = 101 三方加法分享 + Beaver 三元组离线转录")
-    print("=" * 68)
+    print("=" * 72)
+    print("sss_mult 演示：会话绑定 + 乱序缓冲 + 重放幂等 + 冲突中止")
+    print("=" * 72)
 
     bank = TripleBank()
     rng = random.Random(SEED)
-    # 显式合成两个三元组：(a,b) 给定，c = a*b mod 101 由模块精确算出。
-    bank.register(make_triple("demo-triple-1", a=17, b=9, rng=rng))
-    bank.register(make_triple("demo-triple-2", a=33, b=25, rng=rng))
+    bank.register(make_triple("triple-A", a=17, b=9, rng=rng))
+    bank.register(make_triple("triple-B", a=33, b=25, rng=rng))
+    bank.register(make_triple("triple-A2", a=2, b=3, rng=rng))
+    bank.register(make_triple("triple-B2", a=4, b=5, rng=rng))
+
+    # ---- [1] 两个合成会话严格交错、乱序 -----------------------------------
+    xA, yA = 12, 8
+    xB, yB = 11, 7
+    _, _, msgsA = honest_prepare(
+        "mul", bank.get("triple-A"), xA, yA, rng, session_id=SA
+    )
+    _, _, msgsB = honest_prepare(
+        "mul", bank.get("triple-B"), xB, yB, rng, session_id=SB
+    )
 
     transcript = Transcript(bank)
+    print("\n[1] 两会话交错乱序投递（顺序 A2, B1, A0, B2, B0, A1）：")
+    stream = [msgsA[2], msgsB[1], msgsA[0], msgsB[2], msgsB[0], msgsA[1]]
+    for i, m in enumerate(stream, 1):
+        status = transcript.add_message(m)
+        print(f"  第{i}条: session={m.session_id} P{m.party} -> {status!r}")
+    print(f"  会话数={transcript.sessions_count()}，"
+          f"各会话消息数 sA={transcript.messages_count(SA)}, "
+          f"sB={transcript.messages_count(SB)}（同名 op='mul' 互不干扰）")
 
-    # ---- 第一部分：正常重构 ------------------------------------------------
-    x, y = 12, 8
-    triple = bank.get("demo-triple-1")
-    _, _, messages = honest_prepare("mul-demo", triple, x, y, rng)
+    resultA = transcript.open("mul", session_id=SA)
+    resultB = transcript.open("mul", session_id=SB)
+    check_product(resultA, xA, yA, SA)
+    check_product(resultB, xB, yB, SB)
+    print(f"  三元组状态: triple-A={bank.state('triple-A')}, "
+          f"triple-B={bank.state('triple-B')}")
 
-    print(f"\n[1] 正常乘法: x = {x}, y = {y}, op_id = 'mul-demo', "
-          f"triple_id = 'demo-triple-1'")
-    print("  乱序投递 (P2, P0)，再重复投递一条 P0（幂等），最后投递 P1 ...")
-    transcript.add_message(messages[2])
-    transcript.add_message(messages[0])
-    status = transcript.add_message(messages[0])  # 重复一致
-    print(f"  重复 P0 消息的返回状态: {status!r}（消息计数仍为 "
-          f"{transcript.messages_count()}）")
-    print(f"  齐三方前 is_complete = {transcript.is_complete('mul-demo')}")
-    transcript.add_message(messages[1])
-    print(f"  齐三方后 is_complete = {transcript.is_complete('mul-demo')}")
+    # ---- [2] 整批重放：相同重复幂等 ---------------------------------------
+    print("\n[2] 六个消息打乱后整批重放：")
+    replay = [msgsB[1], msgsA[1], msgsA[0], msgsB[0], msgsA[2], msgsB[2]]
+    statuses = [transcript.add_message(m) for m in replay]
+    print(f"  返回状态: {statuses}")
+    assert all(s == "duplicate" for s in statuses)
+    print(f"  消息总数仍为 {transcript.messages_count()}（没有重复落盘）")
+    assert transcript.open("mul", session_id=SA) is resultA
+    assert transcript.open("mul", session_id=SB) is resultB
+    print("  重复打开返回同一缓存结果对象（打开也是幂等的）。")
 
-    result = transcript.open("mul-demo")
-    print_views(result)
+    # ---- [3] 冲突重复中止该操作，重放不能复活；另一会话不受影响 -----------
+    print("\n[3] 错误边界：新转录机中制造冲突重复")
+    t2 = Transcript(bank)
+    _, _, cA = honest_prepare(
+        "mul", bank.get("triple-A2"), 4, 5, rng, session_id=SA
+    )
+    _, _, cB = honest_prepare(
+        "mul", bank.get("triple-B2"), 9, 3, rng, session_id=SB
+    )
+    # 两会话先交错投递：A 收 P0/P2，B 收 P0/P1。
+    for m in (cA[0], cB[0], cA[2], cB[1]):
+        t2.add_message(m)
 
-    z0, z1, z2 = result.output_shares()
-    plain_reference = (x * y) % P  # 独立朴素参考，不经过被测核心
-    print(f"  重构: z_0 + z_1 + z_2 = {z0} + {z1} + {z2} "
-          f"= {sum(result.output_shares())} ≡ {result.product} (mod {P})")
-    print(f"  独立朴素参考: ({x} * {y}) mod {P} = {plain_reference}")
-    assert result.product == plain_reference
-    print("  -> 一致，重构正确。")
-    print(f"  三元组生命周期状态: demo-triple-1 = {bank.state('demo-triple-1')}")
-
-    # ---- 第二部分：复用拒绝（实际触发的异常边界） --------------------------
-    print("\n" + "-" * 68)
-    print("[2] 拒绝边界：尝试在新操作 'mul-reuse' 中复用已消费的 "
-          "'demo-triple-1'")
-    _, _, reuse_messages = honest_prepare("mul-reuse", triple, x=5, y=6, rng=rng)
+    from sss_mult import Message
+    clash = Message("mul", 0, "triple-A2", (cA[0].d + 1) % P, cA[0].e,
+                    session_id=SA)
+    print(f"  向 sA/mul 的 P0 重放一条 d 被篡改的消息 ...")
     try:
-        transcript.add_messages(reuse_messages)
-    except TripleReusedError as exc:
+        t2.add_message(clash)
+    except ConflictError as exc:
         print(f"  捕获 {type(exc).__name__}: {exc}")
-        print("  -> 复用被拒绝；操作未创建，转录状态无部分变更：")
-        print(f"     operations_count = {transcript.operations_count()}（仍为 1）")
-        print(f"     'mul-reuse' 缺方 = {transcript.missing_parties('mul-reuse')}")
-        print(f"     demo-triple-1 状态 = {bank.state('demo-triple-1')}")
-    else:  # pragma: no cover - 防御性：拒绝必须发生
-        raise AssertionError("复用已消费三元组应当被拒绝")
+    else:  # pragma: no cover - 防御性：冲突必须被检出
+        raise AssertionError("冲突重复应当被拒绝")
 
-    # 第二个三元组仍可用于一个全新的串操作，证明拒绝没有污染无关状态。
-    _, _, fresh = honest_prepare("mul-fresh", bank.get("demo-triple-2"), 11, 7, rng)
-    transcript.add_messages(fresh)
-    fresh_res = transcript.open("mul-fresh")
-    assert fresh_res.product == (11 * 7) % P
-    print(f"\n  无关三元组仍可用：'mul-fresh' 重构 = {fresh_res.product} "
-          f"= 11*7 mod {P}（操作计数 {transcript.operations_count()}）")
+    print(f"  sA/mul is_aborted={t2.is_aborted('mul', SA)}，"
+          f"原因: {t2.abort_reason('mul', SA)}")
+    print(f"  triple-A2 状态={bank.state('triple-A2')}（随中止作废）；"
+          f"triple-B2 状态={bank.state('triple-B2')}（无关，保持预留）")
 
-    print("\n演示结束：一次正确重构 + 一次真实复用拒绝，均为实时计算结果。")
+    # 重放原消息（哪怕完全一致）也不能复活已中止操作。
+    try:
+        t2.add_message(cA[0])
+    except OperationAbortedError as exc:
+        print(f"  重放原 P0 一致消息 -> 捕获 {type(exc).__name__}: {exc}")
+    else:  # pragma: no cover
+        raise AssertionError("已中止操作必须拒绝一切重放")
+    try:
+        t2.open("mul", session_id=SA)
+    except OperationAbortedError as exc:
+        print(f"  尝试打开 sA/mul -> 捕获 {type(exc).__name__}")
+
+    # 同 transcript 的另一会话不受影响：补齐后正常打开。
+    t2.add_message(cB[2])
+    resB = t2.open("mul", session_id=SB)
+    check_product(resB, 9, 3, SB)
+    print(f"  中止隔离生效：sB/mul 仍正常，triple-B2={bank.state('triple-B2')}")
+    print(f"  转录机操作总数={t2.operations_count()}（中止操作仍可观测，"
+          f"但不可用；须换新 op_id 与新三元组重做）")
+
+    print("\n演示结束：两会话交错正确重构 + 重放全幂等 + 冲突中止且隔离。")
     return 0
 
 

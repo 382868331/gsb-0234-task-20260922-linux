@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from . import field
 from .errors import FieldTypeError, FieldValueError, IdentifierError
-from .field import MAX_ID_LENGTH, N_PARTIES, P, require_element
+from .field import DEFAULT_SESSION_ID, MAX_ID_LENGTH, N_PARTIES, P, require_element
 
 
 def check_id(value, what: str = "id") -> str:
@@ -135,8 +135,18 @@ def make_triple(triple_id: str, a: int, b: int, rng: random.Random) -> BeaverTri
 class Message:
     """参与方在打开阶段广播的一条转录消息。
 
-    字段全部不可变；``(op_id, party)`` 唯一标识一条消息。重复提交内容
-    完全相同的消息是幂等的；任一字段不同即构成冲突。
+    字段全部不可变；消息的归属键为 ``(session_id, op_id, party)``：
+
+    - 同键重复且内容**完全一致** → 幂等忽略（``"duplicate"``）。
+    - 同键重复但内容不一致（``triple_id``/``d``/``e`` 任一不同）→
+      **冲突，操作进入 ``aborted`` 终态**（见
+      :class:`~sss_mult.errors.OperationAbortedError`），不能靠重放复活。
+    - 不同会话/操作之间完全隔离：相同 ``(op_id, party)`` 在不同会话
+      里是两条独立消息，互不冲突。
+
+    ``session_id`` 带默认值 :data:`~sss_mult.field.DEFAULT_SESSION_ID`
+    （``"default"``），因此 ``Message(op, party, triple, d, e)`` 形式的
+    旧代码无需改动。
     """
 
     op_id: str
@@ -144,13 +154,15 @@ class Message:
     triple_id: str
     d: int  # d_i = x_i - a_i mod p
     e: int  # e_i = y_i - b_i mod p
+    session_id: str = DEFAULT_SESSION_ID
 
     def __post_init__(self):
+        check_id(self.session_id, "session_id")
         check_id(self.op_id, "op_id")
         check_party(self.party)
         check_id(self.triple_id, "triple_id")
-        # require_element 会在赋值前校验；frozen dataclass 用 object.__setattr__
-        # 不需要——这里只做校验，不做规范化（输入已须为合法域元素）。
+        # require_element 会在赋值前校验；frozen dataclass 无需
+        # object.__setattr__——这里只做校验，不做规范化。
         require_element(self.d, "d")
         require_element(self.e, "e")
 
@@ -160,12 +172,17 @@ def derive_messages(
     triple: BeaverTriple,
     x_shares,
     y_shares,
+    *,
+    session_id: str = DEFAULT_SESSION_ID,
 ) -> tuple[Message, Message, Message]:
     """诚实参与方根据自己的输入分享合成三条打开消息。
 
     ``d_i = x_i - a_i mod p``、``e_i = y_i - b_i mod p``。该辅助函数
     只是消息构造的语法糖，协议核心不区分消息是否由它产生。
+
+    :param session_id: 会话 ID（仅限关键字）；默认归入 ``"default"`` 会话。
     """
+    check_id(session_id, "session_id")
     check_id(op_id, "op_id")
     if not isinstance(triple, BeaverTriple):
         raise FieldTypeError(
@@ -177,7 +194,7 @@ def derive_messages(
     for i in range(N_PARTIES):
         d_i = (x_shares[i] - triple.a_shares[i]) % P
         e_i = (y_shares[i] - triple.b_shares[i]) % P
-        msgs.append(Message(op_id, i, triple.triple_id, d_i, e_i))
+        msgs.append(Message(op_id, i, triple.triple_id, d_i, e_i, session_id))
     return tuple(msgs)
 
 

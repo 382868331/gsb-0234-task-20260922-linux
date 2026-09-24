@@ -11,6 +11,7 @@ from sss_mult import (
     IncompleteTranscriptError,
     LimitError,
     Message,
+    OperationAbortedError,
     Transcript,
     TripleBank,
     TripleMismatchError,
@@ -156,22 +157,46 @@ class OrderingAndIdempotencyTest(unittest.TestCase):
 
 
 class ConflictTest(unittest.TestCase):
-    def test_conflicting_d_rejected(self):
-        bank, rng = build_env([("cf", 2, 3)])
+    def test_conflicting_d_aborts_operation_and_voids_triple(self):
+        bank, rng = build_env([("cf", 2, 3), ("cf2", 2, 3)])
         triple = bank.get("cf")
         _, _, msgs = honest_prepare("op", triple, 4, 5, rng)
         t = Transcript(bank)
         t.add_message(msgs[0])
+        t.add_message(msgs[2])
         bad = Message("op", 0, "cf", (msgs[0].d + 1) % P, msgs[0].e)
         with self.assertRaises(ConflictError) as cm:
             t.add_message(bad)
         self.assertIn("op", str(cm.exception))
-        self.assertIn("party=0", str(cm.exception))
-        # 冲突不改变状态。
-        self.assertEqual(t.add_message(msgs[0]), "duplicate")
-        self.assertEqual(t.messages_count(), 1)
+        self.assertIn("party 0", str(cm.exception))
+        # 冲突中止该操作：终态 aborted，冲突消息本身不落盘（缓冲仍是
+        # 冲突前的 P0/P2 快照），但缺方补齐、打开、任何重放都不能复活它。
+        self.assertTrue(t.is_aborted("op"))
+        self.assertEqual(t.missing_parties("op"), (1,))
+        self.assertEqual(t.messages_count(), 2)
+        self.assertEqual(bank.state("cf"), "voided")
+        # 重放原消息（哪怕内容一致）也被拒：中止不可恢复。
+        with self.assertRaises(OperationAbortedError):
+            t.add_message(msgs[0])
+        # 补齐缺失的 P1 同样被拒。
+        with self.assertRaises(OperationAbortedError):
+            t.add_message(msgs[1])
+        with self.assertRaises(OperationAbortedError):
+            t.open("op")
+        with self.assertRaises(OperationAbortedError):
+            t.result("op")
+        # 被作废的三元组不能再被任何新操作领取。
+        _, _, replay = honest_prepare("op-reborn", bank.get("cf"), 4, 5, rng)
+        with self.assertRaises(TripleReusedError) as cm2:
+            t.add_messages(replay)
+        self.assertTrue(cm2.exception.voided)
+        # 新操作没有被创建，批次回滚；另一空闲三元组支持全新操作。
+        self.assertFalse(t.is_aborted("op-reborn"))
+        _, _, fresh = honest_prepare("op-fresh", bank.get("cf2"), 4, 5, rng)
+        t.add_messages(fresh)
+        self.assertEqual(t.open("op-fresh").product, 20)
 
-    def test_triple_id_mismatch_rejected(self):
+    def test_triple_id_mismatch_aborts_operation(self):
         bank, rng = build_env([("tA", 2, 3), ("tB", 4, 5)])
         a = bank.get("tA")
         _, _, msgs_a = honest_prepare("op", a, 4, 5, rng)
@@ -180,10 +205,17 @@ class ConflictTest(unittest.TestCase):
         t.add_message(msgs_a[0])
         with self.assertRaises(TripleMismatchError):
             t.add_message(msgs_b[1])
-        # 冲突消息未落盘；tB 仍空闲。
+        # 操作中止、tA 作废；引用 tB 的冲突消息从未预留 tB，tB 仍空闲。
+        self.assertTrue(t.is_aborted("op"))
+        self.assertEqual(bank.state("tA"), "voided")
         self.assertEqual(bank.state("tB"), "free")
-        t.add_messages([msgs_a[1], msgs_a[2]])
-        self.assertEqual(t.open("op").product, 20)
+        with self.assertRaises(OperationAbortedError):
+            t.open("op")
+        # tB 可被一个全新操作正常领取使用。
+        _, _, fresh = honest_prepare("op2", bank.get("tB"), 4, 5, rng)
+        t.add_messages(fresh)
+        self.assertEqual(t.open("op2").product, 20)
+        self.assertEqual(bank.state("tB"), "consumed")
 
     def test_batch_rollback_on_failure_leaves_no_partial_change(self):
         bank, rng = build_env([("b0", 1, 1), ("b1", 2, 2), ("b2", 3, 3)])
@@ -206,6 +238,29 @@ class ConflictTest(unittest.TestCase):
         self.assertEqual(t.missing_parties("op1"), (1, 2))
         self.assertEqual(t.missing_parties("op3"), (0, 1, 2))
         self.assertEqual(bank.state("b2"), "reserved")
+
+    def test_batch_conflict_aborts_but_rolls_back_unrelated_new_ops(self):
+        # 批次内既有“对已存在操作的冲突”（终态中止），也有为新操作做的
+        # 预留（必须回滚）：两者语义都要成立。
+        bank, rng = build_env([("q0", 1, 1), ("q1", 2, 2), ("q2", 3, 3)])
+        _, _, m0 = honest_prepare("op0", bank.get("q0"), 2, 3, rng)
+        t = Transcript(bank)
+        t.add_messages(m0)  # op0 已存在，持有 q0，已收到 P0/P1/P2。
+        # 制造对 op0 的冲突消息；再夹带一个引用空闲 q1 的新操作 op1。
+        clash = Message("op0", 0, "q0", (m0[0].d + 1) % P, m0[0].e)
+        _, _, m1 = honest_prepare("op1", bank.get("q1"), 4, 5, rng)
+        with self.assertRaises(ConflictError):
+            t.add_messages([m1[0], clash])
+        # op0 中止、q0 作废（终态不回滚）；op1 及其预留被撤销，q1 空闲。
+        self.assertTrue(t.is_aborted("op0"))
+        self.assertEqual(bank.state("q0"), "voided")
+        self.assertEqual(bank.state("q1"), "free")
+        self.assertEqual(t.operations_count(), 1)
+        self.assertEqual(t.missing_parties("op1"), (0, 1, 2))
+        # q1 仍可被全新操作领取。
+        _, _, m1b = honest_prepare("op1b", bank.get("q1"), 4, 5, rng)
+        t.add_messages(m1b)
+        self.assertEqual(t.open("op1b").product, 20)
 
 
 class TripleLifecycleTest(unittest.TestCase):

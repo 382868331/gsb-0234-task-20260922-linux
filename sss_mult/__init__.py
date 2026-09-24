@@ -26,6 +26,7 @@ from .errors import (
     IdentifierError,
     IncompleteTranscriptError,
     LimitError,
+    OperationAbortedError,
     SSSMultError,
     TranscriptError,
     TripleMismatchError,
@@ -33,6 +34,7 @@ from .errors import (
     UnknownTripleError,
 )
 from .field import (
+    DEFAULT_SESSION_ID,
     MAX_ID_LENGTH,
     MAX_MESSAGES,
     MAX_OPERATIONS,
@@ -67,6 +69,7 @@ __all__ = [
     # 常量
     "P",
     "N_PARTIES",
+    "DEFAULT_SESSION_ID",
     "MAX_OPERATIONS",
     "MAX_MESSAGES",
     "MAX_ID_LENGTH",
@@ -102,8 +105,9 @@ __all__ = [
     "TripleMismatchError",
     "TripleReusedError",
     "IncompleteTranscriptError",
+    "OperationAbortedError",
     "UnknownOperationError",
     "LimitError",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

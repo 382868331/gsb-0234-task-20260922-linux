@@ -21,6 +21,10 @@ MAX_OPERATIONS = 1000
 MAX_MESSAGES = 10_000
 MAX_ID_LENGTH = 128
 
+#: 默认会话 ID。不带 ``session_id`` 的旧调用全部归入该会话，行为与
+#: 单会话版本完全一致（会话命名空间的透明兼容）。
+DEFAULT_SESSION_ID = "default"
+
 
 def is_field_element(value) -> bool:
     """判断 ``value`` 是否为合法域元素（``[0, 100]`` 内的非 ``bool`` 整数）。
