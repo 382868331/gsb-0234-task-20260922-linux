@@ -43,16 +43,65 @@ class TripleMismatchError(ConflictError):
 
 
 class TripleReusedError(TranscriptError, ValueError):
-    """``triple_id`` 被第二次消费（被其他操作预留或已打开消费）。"""
+    """``triple_id`` 被第二次领取（被其他操作预留、已消费或已随中止操作烧毁）。"""
 
-    def __init__(self, triple_id: str, op_id: str, holder: str, consumed: bool):
-        state = "already consumed" if consumed else f"reserved by other op {holder!r}"
+    def __init__(
+        self,
+        triple_id: str,
+        op_id: str,
+        holder: str,
+        consumed: bool,
+        *,
+        terminal_state: str = "consumed",
+    ):
+        if consumed:
+            state = f"{terminal_state} by op {holder!r}"
+        else:
+            state = f"reserved by other op {holder!r}"
         msg = f"triple_id {triple_id!r} cannot be used by op {op_id!r}: {state}"
         super().__init__(msg)
         self.triple_id = triple_id
         self.op_id = op_id
         self.holder = holder
         self.consumed = consumed
+        #: 终态种类：``"consumed"``（正常打开消费）或 ``"aborted"``（随冲突操作烧毁）。
+        self.terminal_state = terminal_state if consumed else "reserved"
+
+
+class SessionMismatchError(TranscriptError, ValueError):
+    """消息绑定的 ``session_id`` 与会话不符（路由错误）。
+
+    该错误不改变任何状态：消息既没有进入缓冲，也没有预留任何三元组。
+    """
+
+    def __init__(self, expected_session: str, message_session: str):
+        super().__init__(
+            f"message is bound to session {message_session!r}, "
+            f"cannot be delivered to session {expected_session!r}"
+        )
+        self.expected_session = expected_session
+        self.message_session = message_session
+
+
+class OperationAbortedError(ConflictError):
+    """冲突重复导致操作被永久中止。
+
+    触发条件：向已缓冲的 ``(session_id, op_id, party)`` 投递内容不一致的
+    消息，或向同一操作投递引用不同 ``triple_id`` 的消息。操作进入
+    ``aborted`` 终态：缓冲关闭（后续任何消息与打开都再抛本错误），其已
+    领取的三元组被永久烧毁（``bank.state(...) == "aborted"``），其他操作
+    与其他会话不受影响。
+    """
+
+    def __init__(self, session_id: str, op_id: str, reason: str, party: int | None = None):
+        where = f"session={session_id!r}, op={op_id!r}"
+        if party is not None:
+            where += f", party={party}"
+        super().__init__(f"operation aborted after a conflicting duplicate ({where}): {reason}")
+        self.session_id = session_id
+        self.op_id = op_id
+        self.reason = reason
+        self.party = party
 
 
 class IncompleteTranscriptError(TranscriptError):

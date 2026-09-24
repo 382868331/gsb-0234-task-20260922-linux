@@ -26,7 +26,9 @@ from .errors import (
     IdentifierError,
     IncompleteTranscriptError,
     LimitError,
+    OperationAbortedError,
     SSSMultError,
+    SessionMismatchError,
     TranscriptError,
     TripleMismatchError,
     TripleReusedError,
@@ -48,12 +50,14 @@ from .field import (
 from .protocol import (
     OperationResult,
     PartyView,
+    Session,
     Transcript,
     TripleBank,
     UnknownOperationError,
     honest_prepare,
 )
 from .shares import (
+    DEFAULT_SESSION_ID,
     BeaverTriple,
     Message,
     derive_messages,
@@ -70,6 +74,7 @@ __all__ = [
     "MAX_OPERATIONS",
     "MAX_MESSAGES",
     "MAX_ID_LENGTH",
+    "DEFAULT_SESSION_ID",
     # 域
     "add",
     "sub",
@@ -88,6 +93,7 @@ __all__ = [
     # 协议
     "TripleBank",
     "Transcript",
+    "Session",
     "OperationResult",
     "PartyView",
     "honest_prepare",
@@ -104,6 +110,8 @@ __all__ = [
     "IncompleteTranscriptError",
     "UnknownOperationError",
     "LimitError",
+    "SessionMismatchError",
+    "OperationAbortedError",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

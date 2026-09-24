@@ -48,6 +48,10 @@ def check_party(value) -> int:
     return value
 
 
+#: 未显式给出会话时的默认会话 ID（旧调用自动落在该会话）。
+DEFAULT_SESSION_ID = "default"
+
+
 def split_share(secret, r1, r2):
     """用两个给定随机域元素构造三方加法分享。
 
@@ -135,8 +139,14 @@ def make_triple(triple_id: str, a: int, b: int, rng: random.Random) -> BeaverTri
 class Message:
     """参与方在打开阶段广播的一条转录消息。
 
-    字段全部不可变；``(op_id, party)`` 唯一标识一条消息。重复提交内容
-    完全相同的消息是幂等的；任一字段不同即构成冲突。
+    字段全部不可变。消息通过 ``session_id`` 绑定会话、``op_id`` 绑定操作、
+    ``party`` 绑定参与方；同一 ``(session_id, op_id, party)`` 唯一标识一条
+    消息。重复提交内容完全相同的消息是幂等的；任一字段不同即构成冲突
+    （由 :class:`~sss_mult.protocol.Session` 中止该操作）。
+
+    ``session_id`` 缺省为 :data:`DEFAULT_SESSION_ID`（``"default"``），
+    因此按旧字段顺序的位置参数构造（``Message(op_id, party, triple_id,
+    d, e)``）继续有效。
     """
 
     op_id: str
@@ -144,11 +154,13 @@ class Message:
     triple_id: str
     d: int  # d_i = x_i - a_i mod p
     e: int  # e_i = y_i - b_i mod p
+    session_id: str = DEFAULT_SESSION_ID
 
     def __post_init__(self):
         check_id(self.op_id, "op_id")
         check_party(self.party)
         check_id(self.triple_id, "triple_id")
+        check_id(self.session_id, "session_id")
         # require_element 会在赋值前校验；frozen dataclass 用 object.__setattr__
         # 不需要——这里只做校验，不做规范化（输入已须为合法域元素）。
         require_element(self.d, "d")
@@ -160,13 +172,17 @@ def derive_messages(
     triple: BeaverTriple,
     x_shares,
     y_shares,
+    *,
+    session_id: str = DEFAULT_SESSION_ID,
 ) -> tuple[Message, Message, Message]:
     """诚实参与方根据自己的输入分享合成三条打开消息。
 
-    ``d_i = x_i - a_i mod p``、``e_i = y_i - b_i mod p``。该辅助函数
-    只是消息构造的语法糖，协议核心不区分消息是否由它产生。
+    ``d_i = x_i - a_i mod p``、``e_i = y_i - b_i mod p``。三条消息都绑定
+    到 ``session_id``（缺省默认会话）。该辅助函数只是消息构造的语法糖，
+    协议核心不区分消息是否由它产生。
     """
     check_id(op_id, "op_id")
+    check_id(session_id, "session_id")
     if not isinstance(triple, BeaverTriple):
         raise FieldTypeError(
             f"triple must be a BeaverTriple, got {type(triple).__name__}"
@@ -177,7 +193,7 @@ def derive_messages(
     for i in range(N_PARTIES):
         d_i = (x_shares[i] - triple.a_shares[i]) % P
         e_i = (y_shares[i] - triple.b_shares[i]) % P
-        msgs.append(Message(op_id, i, triple.triple_id, d_i, e_i))
+        msgs.append(Message(op_id, i, triple.triple_id, d_i, e_i, session_id))
     return tuple(msgs)
 
 
