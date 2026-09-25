@@ -33,6 +33,7 @@ from .errors import (
     UnknownTripleError,
 )
 from .field import (
+    MAX_DOT_PRODUCT_LEN,
     MAX_ID_LENGTH,
     MAX_MESSAGES,
     MAX_OPERATIONS,
@@ -46,16 +47,21 @@ from .field import (
     sub,
 )
 from .protocol import (
+    DotPositionResult,
+    DotProductResult,
     OperationResult,
     PartyView,
     Transcript,
     TripleBank,
     UnknownOperationError,
+    dot_product_prepare,
     honest_prepare,
 )
 from .shares import (
     BeaverTriple,
+    DotMessage,
     Message,
+    derive_dot_messages,
     derive_messages,
     make_triple,
     random_share,
@@ -70,6 +76,7 @@ __all__ = [
     "MAX_OPERATIONS",
     "MAX_MESSAGES",
     "MAX_ID_LENGTH",
+    "MAX_DOT_PRODUCT_LEN",
     # 域
     "add",
     "sub",
@@ -80,17 +87,22 @@ __all__ = [
     # 分享 / 三元组 / 消息
     "BeaverTriple",
     "Message",
+    "DotMessage",
     "make_triple",
     "split_share",
     "random_share",
     "reconstruct",
     "derive_messages",
+    "derive_dot_messages",
     # 协议
     "TripleBank",
     "Transcript",
     "OperationResult",
     "PartyView",
     "honest_prepare",
+    "dot_product_prepare",
+    "DotPositionResult",
+    "DotProductResult",
     # 错误
     "SSSMultError",
     "FieldTypeError",

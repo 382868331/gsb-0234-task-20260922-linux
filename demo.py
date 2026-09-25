@@ -20,6 +20,12 @@ from sss_mult import (
     honest_prepare,
     make_triple,
 )
+from sss_mult import (
+    ConflictError,
+    DotMessage,
+    dot_product_prepare,
+    random_share,
+)
 
 SEED = 20260923
 
@@ -102,7 +108,49 @@ def main() -> int:
     print(f"\n  无关三元组仍可用：'mul-fresh' 重构 = {fresh_res.product} "
           f"= 11*7 mod {P}（操作计数 {transcript.operations_count()}）")
 
-    print("\n演示结束：一次正确重构 + 一次真实复用拒绝，均为实时计算结果。")
+    # ---- 第三部分：点积（一批乘法门，一次发布） --------------------------
+    print("\n" + "=" * 68)
+    print("[3] 点积 dot_product：x = (3, 4), y = (5, 6)，手算期望 15+24 = 39")
+    bank.register(make_triple("dot-t0", a=5, b=7, rng=rng))
+    bank.register(make_triple("dot-t1", a=8, b=11, rng=rng))
+    xs = [random_share(3, rng), random_share(4, rng)]
+    ys = [random_share(5, rng), random_share(6, rng)]
+
+    # 先完整验证再整批预留：批内重复 triple_id 在任何预留之前被拒绝。
+    try:
+        transcript.begin_dot_product("dot-bad", ["dot-t0", "dot-t0"])
+    except ConflictError as exc:
+        print(f"  批内重复 triple_id 被拒绝: {exc}")
+        print(f"  验证先于预留：dot-t0 状态 = {bank.state('dot-t0')}, "
+              f"dot-t1 状态 = {bank.state('dot-t1')}（均未预留）")
+    else:
+        raise AssertionError("批内重复 triple_id 应当被拒绝")
+
+    # 诚实消息，乱序交织投递（含一条重复一致消息）。
+    triples = [bank.get("dot-t0"), bank.get("dot-t1")]
+    _, _, dmsgs = dot_product_prepare("dot-demo", triples, [3, 4], [5, 6], rng)
+    transcript.begin_dot_product("dot-demo", ["dot-t0", "dot-t1"])
+    print("  整批预留完成：dot-t0 =", bank.state("dot-t0"),
+          ", dot-t1 =", bank.state("dot-t1"))
+    for m in [dmsgs[4], dmsgs[0], dmsgs[2], dmsgs[4], dmsgs[1], dmsgs[5], dmsgs[3]]:
+        transcript.add_dot_message(m)
+    res = transcript.open_dot("dot-demo")
+    for pos in res.positions:
+        print(f"  位置 {pos.pos}: d={pos.d:3d} e={pos.e:3d} "
+              f"-> 该位置乘积 {pos.product}")
+    print(f"  各方总份额: {res.output_shares()}，重构点积 = {res.value}")
+    plain = (3 * 5 + 4 * 6) % P
+    assert res.value == plain == 39
+    print(f"  独立朴素参考: (3*5 + 4*6) mod {P} = {plain}  -> 一致。")
+
+    # 空点积：返回零且不消耗三元组。
+    transcript.begin_dot_product("dot-empty", [])
+    empty = transcript.open_dot("dot-empty")
+    print(f"  空点积: value = {empty.value}（不消耗任何三元组）")
+    assert empty.value == 0
+
+    print("\n演示结束：乘法重构 + 复用拒绝 + 点积（含批验证/乱序/空批），"
+          "均为实时计算结果。")
     return 0
 
 

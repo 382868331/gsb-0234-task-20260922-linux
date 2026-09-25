@@ -21,6 +21,9 @@ MAX_OPERATIONS = 1000
 MAX_MESSAGES = 10_000
 MAX_ID_LENGTH = 128
 
+#: 单次点积的最大长度（乘法门数量上限）。
+MAX_DOT_PRODUCT_LEN = 1000
+
 
 def is_field_element(value) -> bool:
     """判断 ``value`` 是否为合法域元素（``[0, 100]`` 内的非 ``bool`` 整数）。

@@ -181,6 +181,86 @@ def derive_messages(
     return tuple(msgs)
 
 
+@dataclass(frozen=True)
+class DotMessage:
+    """点积操作中某个位置的一条打开消息。
+
+    与 :class:`Message` 的区别是多了位置下标 ``pos``：一次点积由
+    ``length`` 个独立乘法门组成，每个位置 ``pos`` 独占一个
+    ``triple_id``，消息键为 ``(op_id, pos, party)``。
+    """
+
+    op_id: str
+    pos: int
+    party: int
+    triple_id: str
+    d: int  # d_i = x_i - a_i mod p（该位置）
+    e: int  # e_i = y_i - b_i mod p（该位置）
+
+    def __post_init__(self):
+        check_id(self.op_id, "op_id")
+        check_pos(self.pos)
+        check_party(self.party)
+        check_id(self.triple_id, "triple_id")
+        require_element(self.d, "d")
+        require_element(self.e, "e")
+
+
+def check_pos(value) -> int:
+    """校验点积位置下标：非负严格整数（``bool`` 拒绝）。
+
+    上界（``pos < length``）由转录机按已声明的操作长度检查。
+    """
+    if isinstance(value, bool) or type(value) is not int:
+        raise FieldTypeError(
+            f"pos must be a non-negative int (bool not accepted), "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    if value < 0:
+        raise FieldValueError(f"pos={value} must be non-negative")
+    return value
+
+
+def derive_dot_messages(
+    op_id: str,
+    triples,
+    x_shares_list,
+    y_shares_list,
+) -> tuple[DotMessage, ...]:
+    """诚实方对整个点积一次性生成全部打开消息（按位置、参与方展开）。
+
+    :param triples: 长度 ``n`` 的 :class:`BeaverTriple` 序列，第 ``k`` 个
+        三元组独占第 ``k`` 个位置的乘法。
+    :param x_shares_list: 长度 ``n`` 的分享序列，每项是三方分享三元组。
+    :param y_shares_list: 同上。
+    :returns: ``n * 3`` 条 :class:`DotMessage`，顺序为位置优先、参与方次之；
+        调用方可自行乱序/重复/篡改后投递。
+    """
+    check_id(op_id, "op_id")
+    triples = tuple(triples)
+    x_shares_list = tuple(x_shares_list)
+    y_shares_list = tuple(y_shares_list)
+    if not (len(triples) == len(x_shares_list) == len(y_shares_list)):
+        raise FieldValueError(
+            f"triples/x_shares_list/y_shares_list length mismatch: "
+            f"{len(triples)}/{len(x_shares_list)}/{len(y_shares_list)}"
+        )
+    msgs: list[DotMessage] = []
+    for pos in range(len(triples)):
+        triple = triples[pos]
+        if not isinstance(triple, BeaverTriple):
+            raise FieldTypeError(
+                f"triples[{pos}] must be a BeaverTriple, got {type(triple).__name__}"
+            )
+        xs = _check_share_tuple(x_shares_list[pos], f"x_shares_list[{pos}]")
+        ys = _check_share_tuple(y_shares_list[pos], f"y_shares_list[{pos}]")
+        for i in range(N_PARTIES):
+            d_i = (xs[i] - triple.a_shares[i]) % P
+            e_i = (ys[i] - triple.b_shares[i]) % P
+            msgs.append(DotMessage(op_id, pos, i, triple.triple_id, d_i, e_i))
+    return tuple(msgs)
+
+
 def _check_share_tuple(shares, what: str) -> tuple[int, int, int]:
     try:
         t = tuple(shares)

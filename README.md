@@ -4,6 +4,9 @@
 完成一次乘法的**离线转录**：收集各方打开消息、做一致性/一次性检查，
 齐三方后输出各方视图与重构乘积。
 
+此外提供**点积（dot_product）**：一次操作打包多个乘法门，每个位置独占
+一个预先给定的 triple_id，所有位置三方齐全后**只发布一次**总结果。
+
 - Python 版本：**3.14.7**（仅使用标准库，如 `random`、`dataclasses`、`unittest`）
 - 无需安装任何第三方依赖；不需要网络、账号、真实密钥、数据库、中间件、
   云 API 或 Docker。
@@ -12,11 +15,11 @@
 ## 准确命令
 
 ```bash
-# 运行全部必要测试（在仓库根目录）
-python -m unittest discover -s tests -v
+# 运行全部必要测试（在仓库根目录；也可用 PATH 中的 python3.14）
+./.venv/bin/python -m unittest discover -s tests -v
 
-# 运行固定输入演示（约 0.1 秒，远小于 8 秒预算；真实计算，无 sleep/预录）
-python demo.py
+# 运行固定输入演示（实测约 0.05 秒，远小于 90 秒预算；真实计算，无 sleep/预录）
+./.venv/bin/python demo.py
 ```
 
 ## 协议与公式
@@ -59,6 +62,20 @@ z_i = c_i + d*b_i + e*a_i + (i == 0 ? d*e : 0)   (mod 101)
 | `Transcript(bank, *, max_operations=1000, max_messages=10000)` | 转录机（见下） |
 | `honest_prepare(op_id, triple, x, y, rng)` | 语法糖：返回 `(x_shares, y_shares, messages)` |
 
+点积相关（新增）：
+
+| 名称 | 说明 |
+| --- | --- |
+| `DotMessage(op_id, pos, party, triple_id, d, e)`（不可变） | 点积某位置的一条打开消息，键为 `(op_id, pos, party)` |
+| `derive_dot_messages(op_id, triples, x_shares_list, y_shares_list)` | 诚实方一次生成全部 n×3 条点积消息 |
+| `dot_product_prepare(op_id, triples, x_values, y_values, rng)` | 语法糖：返回 `(x_shares_list, y_shares_list, messages)` |
+| `Transcript.begin_dot_product(op_id, triple_ids)` | 声明点积操作：**先完整验证长度/op_id/全部三元组可用性，再整批原子预留**；空列表合法 |
+| `Transcript.add_dot_message(s)` | 投递点积消息；重复一致幂等，冲突拒绝并保留失败证据 |
+| `Transcript.open_dot(op_id) -> DotProductResult` | 所有位置三方齐全才打开，整个点积只发布一次；重复打开幂等 |
+| `Transcript.dot_product(op_id, triple_ids, x_shares_list, y_shares_list)` | 一站式诚实点积（声明→派生消息→投递→打开） |
+| `Transcript.dot_conflicts(op_id)` / `is_dot_complete(op_id)` | 只读：失败证据 / 是否齐消息 |
+| `DotProductResult` | 字段 `op_id, length, positions, party_sums, value`；`output_shares()` 返回各方总份额 |
+
 `Transcript` 主要方法：
 
 - `add_message(msg) -> "accepted" | "duplicate"`：投递一条消息。
@@ -87,6 +104,20 @@ t.add_messages(msgs)          # 可乱序、可含重复一致消息
 result = t.open("mul-1")
 assert result.product == (12 * 8) % 101
 ```
+
+## 点积协议要点
+
+- 每个位置 k 是一个独立 Beaver 乘法门，独占 triple_ids[k]；公开值 d_k、e_k
+  按位置分别求和，各方输出份额 z_i(k) 后，**各方先把自己的 z_i 跨位置相加**，
+  重构时三方总份额再相加即得点积值。
+- begin_dot_product 的验证顺序：op_id 未占用 → 长度上限 → 每个 triple_id 合法
+  → 批内无重复 → 全部已注册且空闲；**任一失败都不预留任何三元组**
+  （不存在消费一半才发现重复 ID）。
+- 预留是单向的：点积三元组一经预留**永不释放**——即使操作中途失败终止，
+  也不能重新用于另一秘密运算；打开成功后整批转为 consumed。
+- d/e 消息可任意乱序到达；每个位置仍需三方齐全；任一位置缺方时 open_dot
+  抛 IncompleteTranscriptError（missing 为 (pos, party) 二元组），不改变状态。
+- 空点积（长度 0）合法：value = 0，不消耗任何三元组。
 
 ## 错误语义（固定契约）
 
@@ -121,6 +152,7 @@ assert result.product == (12 * 8) % 101
 | 单个转录机操作数 | 1000（构造可覆盖） | `MAX_OPERATIONS` |
 | 单个转录机消息数 | 10000（构造可覆盖） | `MAX_MESSAGES` |
 | ID 长度 | 128 字符 | `MAX_ID_LENGTH` |
+| 单次点积长度 | 1000（构造可覆盖，可为 0） | `MAX_DOT_PRODUCT_LEN` |
 
 `TripleBank` 注册表本身不设数量上限（教学用途）；穷举测试中显式放大了
 转录机上限。短演示不穷举上限规模。
@@ -137,6 +169,10 @@ assert result.product == (12 * 8) % 101
   - 乱序投递、缺方打开无状态变更、重复一致幂等、冲突消息拒绝、
     `triple_id` 串用/跨操作复用拒绝、串操作各自消费、批次失败回滚、
     上限拒绝。
+- `tests/test_dot_product.py`：二维手算点积（含绕模 100·100）、随机向量对照
+  朴素域运算、点积与普通乘法消息全局乱序交织、批内重复/未知/已消费三元组
+  在预留前整批拒绝、长度上限、op_id 冲突、中途冲突拒绝且证据保留、
+  失败后三元组不可转用、批次投递回滚、空点积返回零且不消耗三元组。
 - “分享→重构”的往返一致只作为补充检查。
 
 ## 误差口径
