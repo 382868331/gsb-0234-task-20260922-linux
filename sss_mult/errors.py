@@ -70,5 +70,62 @@ class IncompleteTranscriptError(TranscriptError):
         self.missing = tuple(missing)
 
 
+class DotProductError(TranscriptError):
+    """点积操作相关错误的基类。"""
+
+
+class DotLengthError(DotProductError, ValueError):
+    """点积向量长度非法：长度不一致、为空之外的负值或超过长度上限。
+
+    注意：**空点积（长度 0）合法**，返回零且不消耗任何三元组；
+    该异常只针对真正的非法长度。
+    """
+
+
+class DuplicatePositionError(DotProductError, ValueError):
+    """同一次点积预留了重复的 ``triple_id``（整批拒绝，不预留任何三元组）。"""
+
+
+class TripleBurnedError(TripleReusedError):
+    """引用的三元组属于已终止（冲突）的点积，已被永久作废。
+
+    继承 :class:`TripleReusedError`（``consumed=True``）：作废的三元组
+    与已消费三元组一样，永远不能再用于另一秘密运算，即使导致终止的
+    操作本身从未打开。
+    """
+
+    def __init__(self, triple_id: str, op_id: str, holder: str):
+        super().__init__(triple_id, op_id, holder, consumed=True)
+
+
+class DotProductConflictError(DotProductError, ConflictError):
+    """点积中某位置收到冲突消息，整个点积立即终止。
+
+    终止后：操作标记为 ``failed``，其全部已预留三元组永久作废
+    （``burned``），结果永不发布；异常对象保留失败证据
+    （``op_id``、``position``、``stored``、``incoming``）。
+    """
+
+    def __init__(self, op_id: str, position: int, stored, incoming):
+        super().__init__(
+            f"dot product {op_id!r} terminated by conflicting message at "
+            f"position {position}: stored={stored!r}, incoming={incoming!r}"
+        )
+        self.op_id = op_id
+        self.position = position
+        self.stored = stored
+        self.incoming = incoming
+
+
+class DotProductFailedError(DotProductError):
+    """向已终止的点积继续投递消息或尝试打开（终止证据保留在转录中）。"""
+
+    def __init__(self, op_id: str, reason: str, evidence: DotProductConflictError | None = None):
+        super().__init__(f"dot product {op_id!r} has failed: {reason}")
+        self.op_id = op_id
+        self.reason = reason
+        self.evidence = evidence
+
+
 class LimitError(TranscriptError, ValueError):
     """超过本库声明的接口上限（见 :mod:`sss_mult.field`）。"""

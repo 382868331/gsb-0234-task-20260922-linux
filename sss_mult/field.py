@@ -21,6 +21,9 @@ MAX_OPERATIONS = 1000
 MAX_MESSAGES = 10_000
 MAX_ID_LENGTH = 128
 
+#: 单次点积 ``dot_product`` 的向量长度上限（每个位置独占一个三元组）。
+MAX_DOT_PRODUCT_LEN = 64
+
 
 def is_field_element(value) -> bool:
     """判断 ``value`` 是否为合法域元素（``[0, 100]`` 内的非 ``bool`` 整数）。

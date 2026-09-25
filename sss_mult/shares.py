@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from . import field
 from .errors import FieldTypeError, FieldValueError, IdentifierError
-from .field import MAX_ID_LENGTH, N_PARTIES, P, require_element
+from .field import MAX_DOT_PRODUCT_LEN, MAX_ID_LENGTH, N_PARTIES, P, require_element
 
 
 def check_id(value, what: str = "id") -> str:
@@ -191,3 +191,137 @@ def _check_share_tuple(shares, what: str) -> tuple[int, int, int]:
     for i, v in enumerate(t):
         require_element(v, f"{what}[{i}]")
     return t  # type: ignore[return-value]
+
+
+def check_position(value, length: int) -> int:
+    """校验点积位置：``0 <= position < length`` 的严格整数。"""
+    if isinstance(value, bool) or type(value) is not int:
+        raise FieldTypeError(
+            f"position must be an int (bool not accepted), got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    if not (0 <= value < length):
+        raise FieldValueError(
+            f"position={value} out of range for dot product of length {length} "
+            f"[0, {length - 1}]"
+        )
+    return value
+
+
+def check_share_vectors(x_shares, y_shares) -> tuple[tuple, tuple]:
+    """校验点积的两组“按位置排列的三方分享向量”。
+
+    形状契约：``x_shares`` 是长度 ``n`` 的序列，每个元素是一个长度 3 的
+    域元素元组（位置 ``j`` 上三方各自持有的 ``x`` 分量）；``y_shares``
+    同理。两者长度必须相等，且 ``0 <= n <= MAX_DOT_PRODUCT_LEN``。
+    返回规范化后的两层元组（可为空序列）。
+    """
+    try:
+        xs = tuple(x_shares)
+    except TypeError:
+        raise FieldTypeError("x_shares must be an iterable of 3-tuples") from None
+    try:
+        ys = tuple(y_shares)
+    except TypeError:
+        raise FieldTypeError("y_shares must be an iterable of 3-tuples") from None
+    if isinstance(len(xs), bool):  # pragma: no cover - 元组长度恒为 int
+        pass
+    if len(xs) != len(ys):
+        raise FieldValueError(
+            f"x_shares and y_shares must have equal length, got "
+            f"{len(xs)} and {len(ys)}"
+        )
+    n = len(xs)
+    if type(n) is not int or n < 0:  # pragma: no cover - tuple 长度不可能为负
+        raise FieldValueError(f"bad vector length: {n!r}")
+    if n > MAX_DOT_PRODUCT_LEN:
+        from .errors import DotLengthError
+
+        raise DotLengthError(
+            f"dot product length {n} exceeds MAX_DOT_PRODUCT_LEN="
+            f"{MAX_DOT_PRODUCT_LEN}"
+        )
+    norm_xs = []
+    norm_ys = []
+    for j in range(n):
+        norm_xs.append(_check_share_tuple(xs[j], f"x_shares[{j}]"))
+        norm_ys.append(_check_share_tuple(ys[j], f"y_shares[{j}]"))
+    return tuple(norm_xs), tuple(norm_ys)
+
+
+@dataclass(frozen=True)
+class DotProductMessage:
+    """点积打开阶段某参与方在某一位置上广播的一条消息。
+
+    与 :class:`Message` 形状一致，但额外携带 ``position``；消息键为
+    ``(op_id, position, party)``。``triple_id`` 必须是该点积为
+    ``position`` 位置预留的那一个三元组。重复且完全一致的消息幂等，
+    任一字段不同即冲突（导致整个点积终止）。
+    """
+
+    op_id: str
+    position: int
+    party: int
+    triple_id: str
+    d: int  # d_{j,i} = x_{j,i} - a_{j,i} mod p
+    e: int  # e_{j,i} = y_{j,i} - b_{j,i} mod p
+
+    def __post_init__(self):
+        check_id(self.op_id, "op_id")
+        check_party(self.party)
+        check_id(self.triple_id, "triple_id")
+        require_element(self.d, "d")
+        require_element(self.e, "e")
+        # 位置上限在消息构造期只能按全局长度上限校验；操作级边界
+        （position < 本次点积长度）在转录投递时校验。
+        check_position(self.position, MAX_DOT_PRODUCT_LEN)
+
+
+def derive_dot_messages(
+    op_id: str,
+    triples,
+    x_shares,
+    y_shares,
+) -> tuple[tuple[DotProductMessage, DotProductMessage, DotProductMessage], ...]:
+    """诚实参与方为整个点积生成消息。
+
+    :param triples: 长度 ``n`` 的 :class:`BeaverTriple` 序列，位置 ``j``
+        的乘法独占 ``triples[j]``。
+    :param x_shares: 见 :func:`check_share_vectors`。
+    :param y_shares: 同上。
+    :returns: 长度为 ``n`` 的元组，第 ``j`` 项是该位置的三方消息元组
+        （共 ``3*n`` 条）。``n == 0`` 时返回空元组。
+    """
+    check_id(op_id, "op_id")
+    try:
+        tri = tuple(triples)
+    except TypeError:
+        raise FieldTypeError("triples must be an iterable of BeaverTriple") from None
+    xs, ys = check_share_vectors(x_shares, y_shares)
+    if len(tri) != len(xs):
+        from .errors import DotLengthError
+
+        raise DotLengthError(
+            f"triples length {len(tri)} does not match share vector length {len(xs)}"
+        )
+    for j, tr in enumerate(tri):
+        if not isinstance(tr, BeaverTriple):
+            raise FieldTypeError(
+                f"triples[{j}] must be a BeaverTriple, got {type(tr).__name__}"
+            )
+    per_position = []
+    for j in range(len(tri)):
+        triple = tri[j]
+        msgs = tuple(
+            DotProductMessage(
+                op_id,
+                j,
+                i,
+                triple.triple_id,
+                (xs[j][i] - triple.a_shares[i]) % P,
+                (ys[j][i] - triple.b_shares[i]) % P,
+            )
+            for i in range(N_PARTIES)
+        )
+        per_position.append(msgs)
+    return tuple(per_position)
