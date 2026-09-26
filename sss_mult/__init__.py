@@ -53,6 +53,18 @@ from .protocol import (
     UnknownOperationError,
     honest_prepare,
 )
+from .refresh import (
+    MaskBook,
+    MaskTerm,
+    PartyMaskView,
+    RefreshConflictError,
+    RefreshError,
+    RefreshManager,
+    RefreshPlan,
+    RefreshRecord,
+    RefreshStateError,
+    refresh_share,
+)
 from .shares import (
     BeaverTriple,
     Message,
@@ -91,6 +103,14 @@ __all__ = [
     "OperationResult",
     "PartyView",
     "honest_prepare",
+    # 刷新
+    "MaskBook",
+    "MaskTerm",
+    "PartyMaskView",
+    "RefreshManager",
+    "RefreshPlan",
+    "RefreshRecord",
+    "refresh_share",
     # 错误
     "SSSMultError",
     "FieldTypeError",
@@ -104,6 +124,9 @@ __all__ = [
     "IncompleteTranscriptError",
     "UnknownOperationError",
     "LimitError",
+    "RefreshError",
+    "RefreshConflictError",
+    "RefreshStateError",
 ]
 
 __version__ = "1.0.0"

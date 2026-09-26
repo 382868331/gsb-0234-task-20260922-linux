@@ -1,13 +1,25 @@
-# sss_mult —— 秘密分享乘法的离线转录模拟（教学模块）
+# sss_mult —— 秘密分享乘法与份额刷新的离线转录模拟（教学模块）
 
 在素数域 **GF(101)** 上模拟**三方加法秘密分享**，并用 **Beaver 三元组**
 完成一次乘法的**离线转录**：收集各方打开消息、做一致性/一次性检查，
-齐三方后输出各方视图与重构乘积。
+齐三方后输出各方视图与重构乘积。另提供**份额刷新（refresh）**：
+每对参与方共享掩码、一方加一方减，**换份额不换秘密**，确认收齐后
+原子切换到新世代。
 
 - Python 版本：**3.14.7**（仅使用标准库，如 `random`、`dataclasses`、`unittest`）
 - 无需安装任何第三方依赖；不需要网络、账号、真实密钥、数据库、中间件、
   云 API 或 Docker。
 - 核心、测试、演示全部离线、确定性（示例随机源均带固定种子）。
+
+## 隔离 venv 准备
+
+不需要任何第三方依赖，但建议用隔离虚拟环境运行：
+
+```bash
+python3.14 -m venv .venv        # 需要 Linux 原生 Python 3.14.7
+. .venv/bin/activate
+python -V                        # 应显示 3.14.7
+```
 
 ## 准确命令
 
@@ -17,7 +29,55 @@ python -m unittest discover -s tests -v
 
 # 运行固定输入演示（约 0.1 秒，远小于 8 秒预算；真实计算，无 sleep/预录）
 python demo.py
+
+# 运行刷新迭代演示（< 90 秒，实际约 0.05 秒；真实离线计算）
+python demo_iteration.py
 ```
+
+## 份额刷新（refresh）
+
+对三方加法分享 `s = s0 + s1 + s2 (mod 101)`，刷新为每一对参与方
+`i < j` 引入一个新掩码 `r_ij`：`i` 把自己的份额**加上** `r_ij`，
+`j` 把自己的份额**减去** `r_ij`。每对的 `+r`/`-r` 在总和中抵消，
+因此**秘密不变、份额全部换新**。掩码由调用方注入；经 `MaskBook`
+拆成逐方视图 `PartyMaskView`，每方只持有与自己相关的掩码项。
+
+刷新由 `RefreshPlan` 绑定**刷新 ID、旧世代、新世代、参与方集合**，
+`RefreshManager` 收齐三方确认后才在 `finalize` 中**原子切换**世代；
+此前旧世代完整可用，新旧份额不会混入同一次乘法。语义：
+
+- 重复且一致的 `begin`/`confirm` 幂等（返回 `"duplicate"`）。
+- 参数冲突（同一方确认不同计划、同一刷新 ID 换参数、世代不匹配）
+  使本轮**失败**并抛 `RefreshConflictError`，旧世代完整保留；
+  之后可用新刷新 ID 重开一轮。
+- 缺确认时 `finalize` 抛 `RefreshStateError`，不改变任何状态。
+- 公开转录 `public_record()` 只含计划与确认方，**不含掩码或私有份额**。
+- 实现**不重建秘密再分享**：逐方本地 `share + delta(mod p)`。
+
+```python
+from sss_mult import MaskBook, RefreshManager, RefreshPlan, random_share
+import random
+
+rng = random.Random(20260926)
+m = RefreshManager(random_share(42, rng))
+plan = RefreshPlan("refresh-1", old_generation=0, new_generation=1)
+m.begin(plan)
+for party in (2, 0, 1):          # 确认可乱序
+    m.confirm(party, plan)
+new_shares = m.finalize(MaskBook({(0, 1): 11, (0, 2): 22, (1, 2): 33}))
+assert sum(new_shares) % 101 == 42   # 秘密不变
+```
+
+刷新相关接口（均从 `sss_mult` 导入）：
+
+| 名称 | 说明 |
+| --- | --- |
+| `RefreshPlan(refresh_id, old_generation, new_generation, parties)` | 公开绑定参数（不可变），构造时校验 |
+| `MaskBook(pairs)` / `MaskBook.random(rng)` | 调用方侧成对掩码；`party_view(i)` 拆逐方私有视图 |
+| `PartyMaskView` / `MaskTerm` | 逐方掩码视图；`delta()` 为本方总修正量 |
+| `refresh_share(share, view)` | 逐方本地更新：`share + delta (mod p)` |
+| `RefreshManager(shares, *, generation=0)` | 协调器：`begin/confirm/finalize`，只读 `generation/shares/plan/failed/is_complete/missing_parties/public_record` |
+| `RefreshError` / `RefreshConflictError` / `RefreshStateError` | 刷新错误（继承 `TranscriptError`） |
 
 ## 协议与公式
 
@@ -136,7 +196,12 @@ assert result.product == (12 * 8) % 101
     朴素 `(x*y) % 101`，**不调用被测核心生成期望值**；
   - 乱序投递、缺方打开无状态变更、重复一致幂等、冲突消息拒绝、
     `triple_id` 串用/跨操作复用拒绝、串操作各自消费、批次失败回滚、
-    上限拒绝。
+  上限拒绝。
+- `tests/test_refresh.py`：刷新语义——零掩码、份额恰巧不变（修正量
+  恰为 0）、乱序/重复确认、缺确认阻塞且状态不变、冲突失败保留旧世代、
+  同一刷新 ID 换参数拒绝、世代重放拒绝、失败后可换新 ID 重开、
+  刷新后 Beaver 乘法正确；秘密不变性只用朴素 `sum(shares) % 101`
+  独立检查，不调用被测核心生成期望值。
 - “分享→重构”的往返一致只作为补充检查。
 
 ## 误差口径
@@ -161,6 +226,8 @@ assert result.product == (12 * 8) % 101
 - **不提供恶意安全**：不验证参与方是否按真实份额构造 `d_i/e_i`，恶意方
   可提交不一致消息；本库只保证转录层的一致性与一次性语义，属于半诚实
   模型教学模拟。
+- 刷新同样是**半诚实本地模拟**：假定各方如实应用自己的掩码修正，
+  不验证其知识一致性，不宣称抵抗恶意参与方。
 - 只实现本题契约的有限数学子集：GF(101) 加法/乘法/取负与三方 Beaver
   乘法；**不包含**域逆元/除法、其他域、MAC、承诺、网络协议，不宣称与任何
   行业标准 MPC 实现兼容。
