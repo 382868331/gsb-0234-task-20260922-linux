@@ -20,17 +20,26 @@
 """
 
 from .errors import (
+    ComparisonError,
     ConflictError,
     FieldTypeError,
     FieldValueError,
     IdentifierError,
     IncompleteTranscriptError,
     LimitError,
+    NonBinaryBitError,
     SSSMultError,
     TranscriptError,
     TripleMismatchError,
     TripleReusedError,
     UnknownTripleError,
+)
+from .compare import (
+    MAX_WIDTH,
+    ComparisonReport,
+    GateRecord,
+    less_than,
+    required_triples,
 )
 from .field import (
     MAX_ID_LENGTH,
@@ -104,6 +113,14 @@ __all__ = [
     "IncompleteTranscriptError",
     "UnknownOperationError",
     "LimitError",
+    # 比较电路
+    "MAX_WIDTH",
+    "less_than",
+    "required_triples",
+    "ComparisonReport",
+    "GateRecord",
+    "ComparisonError",
+    "NonBinaryBitError",
 ]
 
 __version__ = "1.0.0"

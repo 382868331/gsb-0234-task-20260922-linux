@@ -153,6 +153,7 @@ class _Op:
     triple_id: str
     messages: dict[int, Message]
     opened: bool = False
+    views: tuple[PartyView, ...] | None = None
     result: OperationResult | None = None
 
 
@@ -312,8 +313,46 @@ class Transcript:
         op = self._ops.get(op_id)
         if op is None:
             raise UnknownOperationError(op_id)
-        if op.opened:
+        if op.opened and op.result is not None:
             return op.result  # type: ignore[return-value]
+
+        views = self._ensure_opened(op_id, op)
+        d = views[0].d
+        e = views[0].e
+        triple = self._bank.get(op.triple_id)
+        product = reconstruct(v.z_i for v in views)
+        result = OperationResult(
+            op_id=op_id,
+            triple_id=op.triple_id,
+            d=d,
+            e=e,
+            x=(triple.a + d) % P,
+            y=(triple.b + e) % P,
+            views=tuple(views),
+            product=product,
+        )
+        op.result = result
+        return result
+
+    def open_shares(self, op_id: str) -> tuple[int, int, int]:
+        """内部路径：只打开并返回乘积份额 (z_0, z_1, z_2)。
+
+        与 open 使用相同的打开语义（齐三方、一次性消费三元组、幂等），
+        但不重构 x、y 或 product，供复合协议（如比较电路）把乘积份额
+        继续作为下游门的输入份额使用。之后仍可调用 open 获得完整重构
+        结果（共享同一份缓存视图）。
+        """
+        check_id(op_id, "op_id")
+        op = self._ops.get(op_id)
+        if op is None:
+            raise UnknownOperationError(op_id)
+        views = self._ensure_opened(op_id, op)
+        return tuple(v.z_i for v in views)  # type: ignore[return-value]
+
+    def _ensure_opened(self, op_id: str, op: _Op) -> tuple:
+        """齐三方后计算各方视图并消费三元组；重复调用返回缓存视图。"""
+        if op.opened:
+            return op.views
 
         missing = tuple(i for i in range(N_PARTIES) if i not in op.messages)
         if missing:
@@ -332,22 +371,11 @@ class Transcript:
             z_i = (c_i + d * b_i + e * a_i + (de if i == 0 else 0)) % P
             views.append(PartyView(i, a_i, b_i, c_i, msgs[i].d, msgs[i].e, d, e, z_i))
 
-        product = reconstruct(v.z_i for v in views)
-        result = OperationResult(
-            op_id=op_id,
-            triple_id=op.triple_id,
-            d=d,
-            e=e,
-            x=(triple.a + d) % P,
-            y=(triple.b + e) % P,
-            views=tuple(views),
-            product=product,
-        )
         # 计算完成后再消费并落盘。
         self._bank.consume(op.triple_id, op_id)
         op.opened = True
-        op.result = result
-        return result
+        op.views = tuple(views)
+        return op.views
 
 
 def honest_prepare(op_id: str, triple: BeaverTriple, x: int, y: int, rng):

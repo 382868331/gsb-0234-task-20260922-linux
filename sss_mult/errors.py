@@ -72,3 +72,24 @@ class IncompleteTranscriptError(TranscriptError):
 
 class LimitError(TranscriptError, ValueError):
     """超过本库声明的接口上限（见 :mod:`sss_mult.field`）。"""
+
+
+class ComparisonError(SSSMultError, ValueError):
+    """无符号整数比较电路相关错误的基类。"""
+
+
+class NonBinaryBitError(ComparisonError):
+    """输入份额重构出的值不是比特（不在 ``{0, 1}`` 内）。
+
+    通过 ``b*(b-1) == 0`` 的零检测判定；错误信息只携带操作数与位下标，
+    不携带该位的秘密值或任何份额。触发该错误前已消费的三元组保持
+    消费状态，不会被复活。
+    """
+
+    def __init__(self, operand: str, index: int):
+        super().__init__(
+            f"bit {index} of operand {operand!r} is not binary "
+            f"(b*(b-1) != 0); refusing to compare"
+        )
+        self.operand = operand
+        self.index = index

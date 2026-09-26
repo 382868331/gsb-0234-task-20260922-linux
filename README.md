@@ -11,13 +11,64 @@
 
 ## 准确命令
 
+### 隔离 venv 准备（可选但推荐）
+
+```bash
+python3 -m venv .venv        # 隔离环境；仅需标准库，无需 pip install
+source .venv/bin/activate
+```
+
 ```bash
 # 运行全部必要测试（在仓库根目录）
 python -m unittest discover -s tests -v
 
 # 运行固定输入演示（约 0.1 秒，远小于 8 秒预算；真实计算，无 sleep/预录）
 python demo.py
+
+# 运行比较电路演示（真实离线计算，约 0.1 秒，远小于 90 秒预算）
+python demo_iteration.py
 ```
+
+## 增量：无符号小整数比较（sss_mult.compare）
+
+在原有 GF(101) 三方加法分享模拟之上，新增按位比较两个无符号小整数
+（位宽 1..8，MAX_WIDTH），输入是**每一位的三方份额**（LSB 在前），
+最终只公开一个比特 a < b。
+
+- Transcript.open_shares(op_id)：新增**只返回乘积份额**的内部路径，
+  不重构 x、y、product；旧 open 保留，两者共享同一份缓存视图与
+  一次性消费语义。比较电路的每个 AND 门都走该路径，不调用旧 open
+  逐门重构。
+- less_than(a_bits, b_bits, *, bank, transcript, triple_ids, op_prefix)
+  返回 ComparisonReport。每个门唯一消费一个三元组，共
+  required_triples(width) = 6 * width 个（每位 2 个位合法性门 +
+  4 个电路门）。
+- **位合法性**：对每一位计算 b*(b-1) 并**只公开是否为零**；非位输入
+  抛 NonBinaryBitError，不直接公开该位。失败时已消费的三元组保持
+  消费、**不复活**；三元组数量/重复校验先于任何消费。
+- **公开报告**只含：各门的掩蔽差值 (d, e)、每位合法性布尔值、最终
+  比较位；不拼接私有份额或中间秘密。
+
+```python
+import random
+from sss_mult import TripleBank, Transcript, make_triple, random_share
+from sss_mult import less_than, required_triples
+
+rng = random.Random(20260926)
+bank = TripleBank()
+ids = [f"t-{i}" for i in range(required_triples(8))]
+for tid in ids:
+    bank.register(make_triple(tid, rng.randrange(101), rng.randrange(101), rng))
+t = Transcript(bank)
+bits = lambda v: [random_share((v >> i) & 1, rng) for i in range(8)]
+report = less_than(bits(37), bits(52), bank=bank, transcript=t, triple_ids=ids)
+assert report.result == 1  # 37 < 52
+```
+
+**适用范围与安全声明**：这是**本地半诚实（被动）教学模拟**——单进程
+上帝视角、不模拟网络、不验证参与方知识一致性；**不能由此宣称恶意
+安全**。比较电路只覆盖 1..8 位无符号整数，不含减法/除法/有符号比较
+等其他功能。
 
 ## 协议与公式
 
@@ -138,6 +189,11 @@ assert result.product == (12 * 8) % 101
     `triple_id` 串用/跨操作复用拒绝、串操作各自消费、批次失败回滚、
     上限拒绝。
 - “分享→重构”的往返一致只作为补充检查。
+- `tests/test_compare.py`：比较电路。1..4 位宽全输入对穷举 + 8 位宽
+  边界/抽样对，期望值仅来自普通整数比较 `a < b`；覆盖相等、最高位
+  不同、非法位（含三元组不复活）、三元组不足/未注册/数量校验先于消费、
+  每门唯一消费，以及公开转录卫生（报告只含掩蔽差值、位合法性布尔与
+  最终比较位，上帝视角秘密不混入）。
 
 ## 误差口径
 
