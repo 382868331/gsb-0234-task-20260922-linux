@@ -1,13 +1,29 @@
-# sss_mult —— 秘密分享乘法的离线转录模拟（教学模块）
+# sss_mult —— 秘密分享乘法与比较的离线转录模拟（教学模块）
 
 在素数域 **GF(101)** 上模拟**三方加法秘密分享**，并用 **Beaver 三元组**
 完成一次乘法的**离线转录**：收集各方打开消息、做一致性/一次性检查，
 齐三方后输出各方视图与重构乘积。
 
+增量能力：在逐位三方份额上做**无符号小整数比较**（位宽 ≤ 8），用
+Beaver 乘法组合布尔门，最终只公开一个比特 `a < b`（见下文
+"比较电路"一节）。
+
 - Python 版本：**3.14.7**（仅使用标准库，如 `random`、`dataclasses`、`unittest`）
 - 无需安装任何第三方依赖；不需要网络、账号、真实密钥、数据库、中间件、
   云 API 或 Docker。
 - 核心、测试、演示全部离线、确定性（示例随机源均带固定种子）。
+
+## 隔离 venv 准备
+
+不需要任何第三方依赖，但建议用隔离虚拟环境运行：
+
+```bash
+python3.14 -m venv .venv        # 需要 Linux 原生 Python 3.14.7
+source .venv/bin/activate
+python -m unittest discover -s tests -v
+```
+
+也可以直接用系统 `python`（3.14.7）运行，无需安装任何包。
 
 ## 准确命令
 
@@ -17,6 +33,9 @@ python -m unittest discover -s tests -v
 
 # 运行固定输入演示（约 0.1 秒，远小于 8 秒预算；真实计算，无 sleep/预录）
 python demo.py
+
+# 运行比较电路演示（约 0.1 秒，远小于 90 秒预算；真实离线计算）
+python demo_iteration.py
 ```
 
 ## 协议与公式
@@ -88,6 +107,65 @@ result = t.open("mul-1")
 assert result.product == (12 * 8) % 101
 ```
 
+## 比较电路（无符号小整数 a < b）
+
+在乘法转录之上提供逐位份额的比较电路（`sss_mult/compare.py`）：
+
+- 输入：两个无符号整数的**逐位三方份额**（MSB 优先），位宽 1–8
+  （`MAX_BIT_WIDTH = 8`）。
+- 门级乘法走新增的内部路径 `Transcript.open_shares(op_id)`：只公开
+  掩蔽差值 `d = x - a`、`e = y - b`，返回乘积份额 `(z_0, z_1, z_2)`，
+  **不重构** `x`、`y` 或乘积。旧的 `Transcript.open`（重构完整视图）
+  保持不变，两条路径共享同一套消息与一次性消费语义。
+- 布尔门组合：NOT/常量仿射为局部份额运算（无通信）；AND、OR、XNOR
+  各用一个 Beaver 乘法门。电路按 MSB→LSB 扫描维护 `lt`/`eq` 两个
+  分享比特，最终公开 `lt` 即 `a < b`。
+- **位合法性**：对每个位 `b` 构造 `v = b*(b-1)`（101 为素数，比特
+  当且仅当 `v == 0`），再用随机非零掩蔽 `r` 计算 `w = v*r`，只公开
+  `w` **是否为零**。`v ≠ 0` 时 `w` 是均匀随机非零元素，不泄露 `b`；
+  非位输入返回 `ok=False` 的失败报告，不直接公开 `b`。
+- **资源语义**：每个门唯一消费一个三元组（`triples_required(width)
+  = 9 * width`）；数量不足在消费任何三元组**之前**抛
+  `InsufficientTriplesError`；中途失败（如非法位）不会复活已消费的
+  三元组。
+- **公开报告** `ComparisonReport`：只含各门的 `(gate, op_id,
+  triple_id, d, e)`、各位的"乘积是否为零"布尔结论与最终比较比特；
+  不拼接任何私有份额或中间秘密。
+
+| 新名称 | 说明 |
+| --- | --- |
+| `compare_bit_shares(bank, a_bits, b_bits, triple_ids, rng, *, label)` | 执行比较，返回 `ComparisonReport` |
+| `triples_required(width)` / `MAX_BIT_WIDTH` | 所需三元组数 / 最大位宽 8 |
+| `ComparisonReport` / `GateRecord` / `BitCheck` | 公开报告与条目（不可变） |
+| `Transcript.open_shares(op_id)` → `ShareOpenResult` | 只返回乘积份额的内部打开路径 |
+| `InsufficientTriplesError` | 三元组数量不足（消费任何资源前抛出） |
+
+最小示例：
+
+```python
+import random
+from sss_mult import (TripleBank, compare_bit_shares, make_triple,
+                      random_share, triples_required)
+
+rng = random.Random(20260926)
+bank = TripleBank()
+ids = []
+for k in range(triples_required(8)):
+    tid = f"t{k}"
+    bank.register(make_triple(tid, rng.randrange(101), rng.randrange(101), rng))
+    ids.append(tid)
+
+def share_bits(v, w):
+    return tuple(random_share((v >> (w - 1 - i)) & 1, rng) for i in range(w))
+
+report = compare_bit_shares(bank, share_bits(37, 8), share_bits(52, 8), ids, rng)
+assert report.ok and report.result == 1   # 37 < 52
+```
+
+**安全声明**：比较电路与乘法转录一样是**本地半诚实（passive）教学
+模拟** —— 单进程上帝视角、不模拟网络、不验证参与方知识一致性，
+**不能由此宣称恶意安全**。
+
 ## 错误语义（固定契约）
 
 错误均继承 `SSSMultError`，并混入内置 `TypeError`/`ValueError`：
@@ -137,6 +215,16 @@ assert result.product == (12 * 8) % 101
   - 乱序投递、缺方打开无状态变更、重复一致幂等、冲突消息拒绝、
     `triple_id` 串用/跨操作复用拒绝、串操作各自消费、批次失败回滚、
     上限拒绝。
+- `tests/test_compare.py`（比较电路）：
+  - 位宽 1–4 **全输入对穷举**（含相等、仅最高位不同的情形），期望值
+    仅来自朴素 Python 整数比较 `a < b`；位宽 8 做边界抽查
+    （0/255/128 vs 127/相等等）；
+  - 非法位（重构值 2/3/7/100）返回 `ok=False` 失败报告，已消费三元组
+    保持 `consumed` 不复活，复用仍被 `TripleReusedError` 拒绝；
+  - 三元组不足在消费任何资源前抛 `InsufficientTriplesError`；每门
+    唯一消费一个三元组；
+  - 公开转录卫生：`GateRecord`/`BitCheck` 结构上只有掩蔽差值与
+    布尔结论，上帝视角的位秘密、份额、三元组秘密不进入公开报告。
 - “分享→重构”的往返一致只作为补充检查。
 
 ## 误差口径
@@ -161,8 +249,9 @@ assert result.product == (12 * 8) % 101
 - **不提供恶意安全**：不验证参与方是否按真实份额构造 `d_i/e_i`，恶意方
   可提交不一致消息；本库只保证转录层的一致性与一次性语义，属于半诚实
   模型教学模拟。
-- 只实现本题契约的有限数学子集：GF(101) 加法/乘法/取负与三方 Beaver
-  乘法；**不包含**域逆元/除法、其他域、MAC、承诺、网络协议，不宣称与任何
+- 只实现本题契约的有限数学子集：GF(101) 加法/乘法/取负、三方 Beaver
+  乘法，以及位宽 ≤ 8 的无符号逐位比较电路；**不包含**域逆元/除法、
+  其他域、有符号/大整数比较、MAC、承诺、网络协议，不宣称与任何
   行业标准 MPC 实现兼容。
 - 无并发保护（单线程教学使用）、无持久化。
 - 题目中“搜索预算耗尽/证明无解”的区分对本模块不适用：本模块没有搜索或

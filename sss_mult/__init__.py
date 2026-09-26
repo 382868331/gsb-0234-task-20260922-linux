@@ -25,12 +25,21 @@ from .errors import (
     FieldValueError,
     IdentifierError,
     IncompleteTranscriptError,
+    InsufficientTriplesError,
     LimitError,
     SSSMultError,
     TranscriptError,
     TripleMismatchError,
     TripleReusedError,
     UnknownTripleError,
+)
+from .compare import (
+    MAX_BIT_WIDTH,
+    BitCheck,
+    ComparisonReport,
+    GateRecord,
+    compare_bit_shares,
+    triples_required,
 )
 from .field import (
     MAX_ID_LENGTH,
@@ -48,6 +57,7 @@ from .field import (
 from .protocol import (
     OperationResult,
     PartyView,
+    ShareOpenResult,
     Transcript,
     TripleBank,
     UnknownOperationError,
@@ -70,6 +80,7 @@ __all__ = [
     "MAX_OPERATIONS",
     "MAX_MESSAGES",
     "MAX_ID_LENGTH",
+    "MAX_BIT_WIDTH",
     # 域
     "add",
     "sub",
@@ -89,8 +100,15 @@ __all__ = [
     "TripleBank",
     "Transcript",
     "OperationResult",
+    "ShareOpenResult",
     "PartyView",
     "honest_prepare",
+    # 比较电路
+    "compare_bit_shares",
+    "triples_required",
+    "ComparisonReport",
+    "GateRecord",
+    "BitCheck",
     # 错误
     "SSSMultError",
     "FieldTypeError",
@@ -104,6 +122,7 @@ __all__ = [
     "IncompleteTranscriptError",
     "UnknownOperationError",
     "LimitError",
+    "InsufficientTriplesError",
 ]
 
 __version__ = "1.0.0"

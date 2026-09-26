@@ -72,3 +72,17 @@ class IncompleteTranscriptError(TranscriptError):
 
 class LimitError(TranscriptError, ValueError):
     """超过本库声明的接口上限（见 :mod:`sss_mult.field`）。"""
+
+
+class InsufficientTriplesError(TranscriptError, ValueError):
+    """比较电路所需的 Beaver 三元组数量不足。
+
+    该错误在任何三元组被预留/消费之前抛出，不留下部分变更。
+    """
+
+    def __init__(self, required: int, available: int):
+        super().__init__(
+            f"insufficient Beaver triples: required {required}, got {available}"
+        )
+        self.required = required
+        self.available = available

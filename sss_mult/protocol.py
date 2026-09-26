@@ -86,6 +86,22 @@ class OperationResult:
         return tuple(v.z_i for v in self.views)  # type: ignore[return-value]
 
 
+@dataclass(frozen=True)
+class ShareOpenResult:
+    """只含乘积份额的内部打开结果（不重构 ``x``、``y``、``product``）。
+
+    供组合电路（如布尔门）在门级别使用：公开值只有掩蔽差值
+    ``d = x - a``、``e = y - b``，输出仅为三方份额
+    ``z_shares``，秘密与重构乘积都不离开本地模拟。
+    """
+
+    op_id: str
+    triple_id: str
+    d: int
+    e: int
+    z_shares: tuple[int, int, int]
+
+
 class TripleBank:
     """Beaver 三元组注册表，负责 ``triple_id`` 的一次性生命周期。"""
 
@@ -154,6 +170,7 @@ class _Op:
     messages: dict[int, Message]
     opened: bool = False
     result: OperationResult | None = None
+    share_result: ShareOpenResult | None = None
 
 
 class Transcript:
@@ -306,15 +323,14 @@ class Transcript:
 
     # ---- 打开 ---------------------------------------------------------
 
-    def open(self, op_id: str) -> OperationResult:
-        """齐三方后打开操作并计算各方视图；重复打开返回缓存结果（幂等）。"""
-        check_id(op_id, "op_id")
-        op = self._ops.get(op_id)
-        if op is None:
-            raise UnknownOperationError(op_id)
-        if op.opened:
-            return op.result  # type: ignore[return-value]
+    def _open_core(self, op_id: str, op: _Op) -> ShareOpenResult:
+        """齐三方后执行打开的核心步骤：公开 d/e、计算份额、消费三元组。
 
+        幂等：已打开的操作直接返回缓存的份额结果。缺方抛
+        :class:`IncompleteTranscriptError` 且不改变任何状态。
+        """
+        if op.share_result is not None:
+            return op.share_result
         missing = tuple(i for i in range(N_PARTIES) if i not in op.messages)
         if missing:
             # 关键：缺方不消费三元组、不缓存任何结果。
@@ -325,12 +341,56 @@ class Transcript:
         d = sum(m.d for m in msgs) % P
         e = sum(m.e for m in msgs) % P
         de = (d * e) % P
+        z_shares = tuple(
+            (triple.c_shares[i] + d * triple.b_shares[i] + e * triple.a_shares[i]
+             + (de if i == 0 else 0)) % P
+            for i in range(N_PARTIES)
+        )
+        share_result = ShareOpenResult(
+            op_id=op_id,
+            triple_id=op.triple_id,
+            d=d,
+            e=e,
+            z_shares=z_shares,  # type: ignore[arg-type]
+        )
+        # 计算完成后再消费并落盘。
+        self._bank.consume(op.triple_id, op_id)
+        op.opened = True
+        op.share_result = share_result
+        return share_result
 
+    def open_shares(self, op_id: str) -> ShareOpenResult:
+        """只返回乘积份额的内部打开路径（供门级组合电路使用）。
+
+        与 :meth:`open` 使用相同的消息与一次性消费语义，但**不重构**
+        ``x``、``y`` 或乘积：公开值只有掩蔽差值 ``d``、``e``，
+        返回值仅含三方输出份额。重复调用幂等。
+        """
+        check_id(op_id, "op_id")
+        op = self._ops.get(op_id)
+        if op is None:
+            raise UnknownOperationError(op_id)
+        return self._open_core(op_id, op)
+
+    def open(self, op_id: str) -> OperationResult:
+        """齐三方后打开操作并计算各方视图；重复打开返回缓存结果（幂等）。"""
+        check_id(op_id, "op_id")
+        op = self._ops.get(op_id)
+        if op is None:
+            raise UnknownOperationError(op_id)
+        if op.result is not None:
+            return op.result
+        share_result = self._open_core(op_id, op)
+        triple = self._bank.get(op.triple_id)
+        msgs = [op.messages[i] for i in range(N_PARTIES)]
+        d, e = share_result.d, share_result.e
         views: list[PartyView] = []
         for i in range(N_PARTIES):
             a_i, b_i, c_i = triple.party_view(i)
-            z_i = (c_i + d * b_i + e * a_i + (de if i == 0 else 0)) % P
-            views.append(PartyView(i, a_i, b_i, c_i, msgs[i].d, msgs[i].e, d, e, z_i))
+            views.append(
+                PartyView(i, a_i, b_i, c_i, msgs[i].d, msgs[i].e, d, e,
+                          share_result.z_shares[i])
+            )
 
         product = reconstruct(v.z_i for v in views)
         result = OperationResult(
@@ -343,9 +403,6 @@ class Transcript:
             views=tuple(views),
             product=product,
         )
-        # 计算完成后再消费并落盘。
-        self._bank.consume(op.triple_id, op_id)
-        op.opened = True
         op.result = result
         return result
 
