@@ -26,7 +26,12 @@ from .errors import (
     IdentifierError,
     IncompleteTranscriptError,
     LimitError,
+    IncompleteRefreshError,
+    RefreshConflictError,
+    RefreshError,
+    RefreshReusedError,
     SSSMultError,
+    StaleGenerationError,
     TranscriptError,
     TripleMismatchError,
     TripleReusedError,
@@ -62,6 +67,16 @@ from .shares import (
     reconstruct,
     split_share,
 )
+from .refresh import (
+    RefreshConfirmation,
+    RefreshCoordinator,
+    RefreshResult,
+    check_masks,
+    make_masks,
+    mask_view,
+    refresh_share,
+    refresh_shares,
+)
 
 __all__ = [
     # 常量
@@ -85,6 +100,15 @@ __all__ = [
     "random_share",
     "reconstruct",
     "derive_messages",
+    # 刷新
+    "RefreshConfirmation",
+    "RefreshCoordinator",
+    "RefreshResult",
+    "check_masks",
+    "make_masks",
+    "mask_view",
+    "refresh_share",
+    "refresh_shares",
     # 协议
     "TripleBank",
     "Transcript",
@@ -104,6 +128,11 @@ __all__ = [
     "IncompleteTranscriptError",
     "UnknownOperationError",
     "LimitError",
+    "RefreshError",
+    "RefreshConflictError",
+    "RefreshReusedError",
+    "StaleGenerationError",
+    "IncompleteRefreshError",
 ]
 
 __version__ = "1.0.0"

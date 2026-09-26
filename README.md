@@ -1,13 +1,25 @@
 # sss_mult —— 秘密分享乘法的离线转录模拟（教学模块）
 
-在素数域 **GF(101)** 上模拟**三方加法秘密分享**，并用 **Beaver 三元组**
-完成一次乘法的**离线转录**：收集各方打开消息、做一致性/一次性检查，
-齐三方后输出各方视图与重构乘积。
+在素数域 **GF(101)** 上模拟**三方加法秘密分享**（注意：是加法分享，
+不是 Shamir 分享），并用 **Beaver 三元组**完成一次乘法的**离线转录**：
+收集各方打开消息、做一致性/一次性检查，齐三方后输出各方视图与重构乘积。
+增量能力：**份额刷新（refresh）**——各方把手里的份额换成新份额，
+而重构出的秘密保持不变。
 
 - Python 版本：**3.14.7**（仅使用标准库，如 `random`、`dataclasses`、`unittest`）
 - 无需安装任何第三方依赖；不需要网络、账号、真实密钥、数据库、中间件、
   云 API 或 Docker。
 - 核心、测试、演示全部离线、确定性（示例随机源均带固定种子）。
+
+## 隔离环境准备（可选但推荐）
+
+本库只用标准库，任何 Python 3.14.7 解释器都能直接运行；若希望与系统
+环境隔离，可建一个虚拟环境（不需要安装任何依赖）：
+
+```bash
+python3.14 -m venv .venv
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## 准确命令
 
@@ -15,8 +27,11 @@
 # 运行全部必要测试（在仓库根目录）
 python -m unittest discover -s tests -v
 
-# 运行固定输入演示（约 0.1 秒，远小于 8 秒预算；真实计算，无 sleep/预录）
+# 运行固定输入演示（约 0.1 秒；真实计算，无 sleep/预录）
 python demo.py
+
+# 运行刷新 + 刷新后乘法演示（约 0.1 秒，远低于 90 秒预算；真实离线计算）
+python demo_iteration.py
 ```
 
 ## 协议与公式
@@ -41,6 +56,63 @@ z_i = c_i + d*b_i + e*a_i + (i == 0 ? d*e : 0)   (mod 101)
 
 常量 `d*e` **只加给 0 号参与方**。重构：`z_0 + z_1 + z_2 ≡ x*y (mod 101)`。
 
+## 份额刷新（refresh）
+
+目标：**保留同一个秘密，但把各方手里的份额换新**。对每一对参与方
+`i < j`，由调用方（测试/演示）注入一个掩码 `r_ij`；参与方 `i` 把自己的
+份额加上 `r_ij`，参与方 `j` 把自己的份额减去 `r_ij`（均模 101）：
+
+```
+s_i' = s_i + Σ_{j>i} r_ij - Σ_{j<i} r_ji   (mod 101)
+```
+
+每对掩码在总和中一加一减恰好抵消，故 `Σ s_i' ≡ Σ s_i ≡ secret`，
+**绝不先重建秘密再分享**。隐私边界：
+
+- 各方只持有与自己相关的掩码（`mask_view(masks, i)`）；`refresh_share`
+  收到与己无关的掩码对会直接拒绝。
+- 公开确认 `RefreshConfirmation` 只含 `refresh_id / party / 世代号 / 参与方
+  集合`，**不含掩码或私有份额**；协调器 `RefreshCoordinator` 从不接触
+  掩码与份额，只跟踪公开状态。
+
+世代与原子切换：每轮刷新绑定 `(refresh_id, old_generation,
+new_generation, parties)`，`new_generation` 必须等于 `old_generation + 1`，
+`old_generation` 必须等于协调器当前世代（否则 `StaleGenerationError`，
+即世代重放/跳跃被拒绝）。收齐参与方集合中全部确认后，`commit` 才原子地
+把当前世代切到新世代；缺确认抛 `IncompleteRefreshError` 且**不改变任何
+状态**。重复且一致的确认幂等（返回 `"duplicate"`）；冲突确认使本轮失败、
+旧世代完整保留，失败轮不能提交也不能继续确认；同一 `refresh_id` 无论
+已完成或已失败都不能再次生效（`RefreshReusedError`），同参数重复
+`begin` 幂等。`check_generation(gen)` 可给份额打世代标签，防止新旧份额
+混入同次乘法。
+
+适用范围：与协议核心一致，这只是**半诚实模型下的本地教学模拟**，不宣称
+能抵抗恶意参与方（不验证各方是否真按掩码更新了份额）。
+
+最小示例：
+
+```python
+import random
+from sss_mult import (
+    RefreshConfirmation, RefreshCoordinator, make_masks, mask_view,
+    random_share, refresh_share,
+)
+
+rng = random.Random(20260926)
+shares = random_share(37, rng)                 # 世代 0 的份额
+coord = RefreshCoordinator()                  # 当前世代 0
+masks = make_masks(((0, 1), (0, 2), (1, 2)), rng)  # 掩码由调用方注入
+
+coord.begin("r1", 0, 1)
+new_shares = tuple(
+    refresh_share(shares[p], p, mask_view(masks, p)) for p in (0, 1, 2)
+)                                              # 各方只用自己的掩码视图
+for p in (0, 1, 2):                            # 公开确认，可乱序、可重复
+    coord.confirm(RefreshConfirmation("r1", p, 0, 1, (0, 1, 2)))
+coord.commit("r1")                            # 原子切换到世代 1
+assert sum(new_shares) % 101 == 37             # 秘密不变
+```
+
 ## 数据结构与接口
 
 全部从 `sss_mult` 包导入：
@@ -58,6 +130,12 @@ z_i = c_i + d*b_i + e*a_i + (i == 0 ? d*e : 0)   (mod 101)
 | `TripleBank()` | 三元组注册表；`register/get/state`，生命周期 `free → reserved(op) → consumed` |
 | `Transcript(bank, *, max_operations=1000, max_messages=10000)` | 转录机（见下） |
 | `honest_prepare(op_id, triple, x, y, rng)` | 语法糖：返回 `(x_shares, y_shares, messages)` |
+| `check_masks(masks, parties=None)` / `make_masks(pairs, rng)` | 掩码映射 `{(i,j): r_ij}` 校验/生成（随机源由调用方注入） |
+| `mask_view(masks, party)` | 抽取单方私有掩码视图（只含与己相关的对） |
+| `refresh_share(share, party, view)` / `refresh_shares(shares, masks)` | 单方本地刷新份额 / 上帝视角整组刷新（仅测试演示用） |
+| `RefreshConfirmation`（不可变） | 公开确认：仅 `refresh_id/party/世代号/参与方集合`，不含掩码与份额 |
+| `RefreshCoordinator(parties=(0,1,2))` | 刷新协调器：`begin/confirm/commit`，只读 `current_generation/is_complete/missing_parties/check_generation` |
+| `RefreshResult`（不可变） | 已提交刷新的公开记录：`refresh_id/旧新世代/参与方集合` |
 
 `Transcript` 主要方法：
 
@@ -108,6 +186,16 @@ assert result.product == (12 * 8) % 101
   该错误**不改变任何状态**（不消费三元组、不缓存结果），补齐后可重试。
 - `UnknownOperationError`：打开一个从未收到消息的 `op_id`。
 - `LimitError`：超过操作数/消息数上限。
+- `RefreshError`：刷新相关错误基类（未知 `refresh_id`、世代跳号、参与方
+  集合不匹配等）。
+- `RefreshConflictError`（`ConflictError` 子类）：同一刷新轮内确认内容
+  不一致；本轮失败，旧世代完整保留，失败轮不能提交也不能继续确认。
+- `RefreshReusedError`：同一 `refresh_id` 已完成或已失败，不能再次生效
+  （换参数或原参数重放都拒绝）。
+- `StaleGenerationError`：刷新绑定的旧世代与当前世代不一致（世代重放/
+  跳跃），或 `check_generation` 发现份额世代标签过期。
+- `IncompleteRefreshError`：确认未收齐时 `commit`；携带 `missing` 元组，
+  **不改变任何状态**，补齐后可重试。
 
 失败原子性：单条 `add_message` 的所有检查先于状态落盘；`add_messages`
 整批回滚。不存在“未说明的部分变更”。
@@ -137,6 +225,16 @@ assert result.product == (12 * 8) % 101
   - 乱序投递、缺方打开无状态变更、重复一致幂等、冲突消息拒绝、
     `triple_id` 串用/跨操作复用拒绝、串操作各自消费、批次失败回滚、
     上限拒绝。
+- `tests/test_refresh.py`（新增）：
+  - 秘密不变性：随机掩码多秘密值 + 小掩码 3×3×3 穷举 + 连续 5 轮链式刷新，
+    期望只来自**独立朴素模加法** `sum(shares) % 101`；
+  - 零掩码份额不变、非零掩码净额为零（份额恰巧不变）、掩码视图隔离
+    （与己无关的掩码对被拒绝）、掩码校验；
+  - 乱序确认、重复确认幂等、缺确认提交无状态变更、冲突确认使本轮失败且
+    旧世代完整保留、同一 `refresh_id` 复用/换参数拒绝、世代重放/跳号拒绝、
+    参与方集合不匹配拒绝、公开确认字段不含掩码与份额；
+  - 刷新后乘法：新世代份额进入 Beaver 转录，期望只来自朴素 `(x*y) % 101`，
+    旧世代标签被 `StaleGenerationError` 拒绝。
 - “分享→重构”的往返一致只作为补充检查。
 
 ## 误差口径
@@ -165,5 +263,8 @@ assert result.product == (12 * 8) % 101
   乘法；**不包含**域逆元/除法、其他域、MAC、承诺、网络协议，不宣称与任何
   行业标准 MPC 实现兼容。
 - 无并发保护（单线程教学使用）、无持久化。
+- 刷新同样是半诚实本地模拟：协调器只跟踪公开状态，不验证各方是否真按
+  掩码更新了份额，不承诺恶意安全；`refresh_shares` 这类上帝视角便捷函数
+  仅用于测试与演示。
 - 题目中“搜索预算耗尽/证明无解”的区分对本模块不适用：本模块没有搜索或
   求解过程，只有可直接判定的接受/拒绝。

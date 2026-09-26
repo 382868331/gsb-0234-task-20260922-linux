@@ -72,3 +72,43 @@ class IncompleteTranscriptError(TranscriptError):
 
 class LimitError(TranscriptError, ValueError):
     """超过本库声明的接口上限（见 :mod:`sss_mult.field`）。"""
+
+
+class RefreshError(TranscriptError):
+    """份额刷新（refresh）相关错误的基类。"""
+
+
+class RefreshConflictError(ConflictError):
+    """同一刷新轮内出现内容不一致的确认；本轮失败，旧世代保持完整。"""
+
+
+class RefreshReusedError(RefreshError, ValueError):
+    """refresh_id 已被使用（已完成或已绑定其他参数），不能再次生效。"""
+
+    def __init__(self, refresh_id: str, detail: str):
+        super().__init__(f"refresh_id {refresh_id!r} cannot take effect again: {detail}")
+        self.refresh_id = refresh_id
+
+
+class StaleGenerationError(RefreshError, ValueError):
+    """刷新绑定的旧世代与当前世代不一致（世代重放/跳跃）。"""
+
+    def __init__(self, expected: int, got: int):
+        super().__init__(
+            f"stale generation: current generation is {expected}, "
+            f"but refresh references old_generation={got}"
+        )
+        self.expected = expected
+        self.got = got
+
+
+class IncompleteRefreshError(RefreshError):
+    """确认未收齐时尝试原子切换；不改变任何状态，补齐后可重试。"""
+
+    def __init__(self, refresh_id: str, missing: tuple):
+        super().__init__(
+            f"refresh {refresh_id!r} cannot commit: missing confirmations "
+            f"from parties {list(missing)}"
+        )
+        self.refresh_id = refresh_id
+        self.missing = tuple(missing)
